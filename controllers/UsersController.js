@@ -1,39 +1,54 @@
 import sha1 from 'sha1';
-import Queue from 'bull/lib/queue';
+import { ObjectId } from 'mongodb';
 import dbClient from '../utils/db';
+import redisClient from '../utils/redis';
 
-const userQueue = new Queue('email sending');
-
-export default class UsersController {
-  static async postNew(req, res) {
-    const email = req.body ? req.body.email : null;
-    const password = req.body ? req.body.password : null;
-
+const UsersController = {
+  postNew: async (req, res) => {
+    const { email } = req.body;
     if (!email) {
-      res.status(400).json({ error: 'Missing email' });
-      return;
+      return res.status(400).send({ error: 'Missing email' });
     }
+    const { password } = req.body;
     if (!password) {
-      res.status(400).json({ error: 'Missing password' });
+      return res.status(400).json({ error: 'Missing password' });
+    }
+    // check if email already exists
+    if ((await dbClient.userCollection.countDocuments({ email })) > 0) {
+      return res.status(400).json({ error: 'Already exist' });
+    }
+
+    const doc = {
+      email,
+      password: sha1(password),
+    };
+    const result = await dbClient.userCollection.insertOne(doc);
+    return res.status(201).json({ id: result.insertedId, email });
+  },
+
+  getMe: async (req, res) => {
+    const token = req.headers['x-token'];
+
+    // check if token exists
+    if (!token) {
+      res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const user = await (await dbClient.usersCollection()).findOne({ email });
 
-    if (user) {
-      res.status(400).json({ error: 'Already exist' });
+    // construct key from token
+    const key = `auth_${token}`;
+    // retrieve user id from redis with token
+    const userId = await redisClient.get(key);
+
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const insertionInfo = await (await dbClient.usersCollection())
-      .insertOne({ email, password: sha1(password) });
-    const userId = insertionInfo.insertedId.toString();
 
-    userQueue.add({ userId });
-    res.status(201).json({ email, id: userId });
-  }
+    // search mongo for user with object id
+    const user = await dbClient.userCollection.findOne({ _id: new ObjectId(userId) });
+    res.json({ id: userId, email: user.email });
+  },
+};
 
-  static async getMe(req, res) {
-    const { user } = req;
-
-    res.status(200).json({ email: user.email, id: user._id.toString() });
-  }
-}
+export default UsersController;
